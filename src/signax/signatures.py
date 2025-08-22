@@ -55,6 +55,48 @@ def signature(
         dimension of size `batch` as the first dimension.
 
     """
+    return signature_from_increments(
+        jnp.diff(path, axis=path.ndim - 2),
+        depth,
+        stream=stream,
+        flatten=flatten,
+        num_chunks=num_chunks,
+        unroll=unroll,
+    )
+
+
+@partial(jax.jit, static_argnames=("num_chunks", "depth", "stream", "flatten", "unroll"))
+def signature_from_increments(
+    path_increments: Float[Array, "path_len dim"] | Float[Array, "batch path_len dim"],
+    depth: int,
+    stream: bool = False,
+    flatten: bool = True,
+    num_chunks: int = 1,
+    unroll: int | bool = 1,
+) -> list[Array] | Array:
+    """
+    Compute the signature of path increments. Automatically dispatches to vmap or not based on the shape of `path_increments`.
+
+    Args:
+        paths_increments: size (path_len - 1, dim) or (batch, path_len, dim)
+        depth: signature is truncated at this depth
+        stream: whether to handle `path` as a stream. Default is False
+        flatten: whether to flatten the output. Default is False
+        num_chunks: number of chunks to use. Default is 1. If > 1, path will be divided into
+        chunks to compute signatures. Then, obtained signatures are combined (using Chen's identity).
+        unroll: the `unroll` parameter passed to `jax.lax.scan`. Default is 1
+
+    Returns:
+        If `stream` is `True`, this will return a list of `Array` in a form
+            [(path_len - 1, dim), (path_len - 1, dim, dim), (path_len - 1, dim, dim, dim), ...]
+        If `stream` is `False`, this will return a list of `Array` in a form
+            [(dim, ), (dim, dim), (dim, dim, dim), ...]
+        If `flatten` is `True`, this will return a flattened array of shape
+            (dim + dim**2 + ... + dim**depth, )
+        If your path is of shape (batch, path_len, dim), all of the above will have an extra
+        dimension of size `batch` as the first dimension.
+
+    """
     if num_chunks > 1:
         sig_fun: Callable[[Array], Array | list[Array]] = partial(
             _signature_chunked,
@@ -69,17 +111,17 @@ def signature(
             _signature, depth=depth, stream=stream, flatten=flatten, unroll=unroll
         )
     # this is just to handle shape errors
-    if path.ndim == 2:
-        return sig_fun(path)  # regular case
-    if path.ndim == 3:  # batch case (mimics signatory)
-        return jax.vmap(sig_fun)(path)
-    msg = f"Path must be of shape (path_length, path_dim) or (batch, path_length, path_dim), got {path.shape}"
+    if path_increments.ndim == 2:
+        return sig_fun(path_increments)  # regular case
+    if path_increments.ndim == 3:  # batch case (mimics signatory)
+        return jax.vmap(sig_fun)(path_increments)
+    msg = f"Path increments must be of shape (path_length-1, path_dim) or (batch, path_length-1, path_dim), got {path_increments.shape}"
     raise ValueError(msg)
 
 
 @partial(jax.jit, static_argnames=["depth", "stream", "flatten", "unroll"])
 def _signature(
-    path: Float[Array, "path_len dim"],
+    path_increments: Float[Array, "path_len-1 dim"],
     depth: int,
     stream: bool = False,
     flatten: bool = False,
@@ -101,8 +143,6 @@ def _signature(
             [(dim, ), (dim, dim), (dim, dim, dim), ...]
         unroll: the `unroll` parameter passed to `jax.lax.scan`. Default is 1
     """
-
-    path_increments = jnp.diff(path, axis=0)
     exp_term = restricted_exp(path_increments[0], depth=depth)
 
     def _body(carry, path_inc):
@@ -132,7 +172,7 @@ def _signature(
 
 @partial(jax.jit, static_argnames=["depth", "num_chunks", "stream", "flatten", "unroll"])
 def _signature_chunked(
-    path: Float[Array, "path_len dim"],
+    path_increments: Float[Array, "path_len-1 dim"],
     depth: int,
     num_chunks: int,
     stream: bool = False,
@@ -153,17 +193,14 @@ def _signature_chunked(
         If `stream` is `False`, this will return a list of `Array` in a form
             [(dim, ), (dim, dim), (dim, dim, dim), ...]
     """
-    length, dim = path.shape
-    chunk_length = int((length - 1) / num_chunks)
-    remainder = (length - 1) % num_chunks
+    length, dim = path_increments.shape
+    chunk_length = int(length / num_chunks)
+    remainder = length % num_chunks
     bulk_length = length - remainder
 
-    path_bulk = path[1:bulk_length]
+    path_bulk = path_increments[:bulk_length]
     path_bulk = jnp.reshape(path_bulk, (num_chunks, chunk_length, dim))
-    basepoints = jnp.roll(path_bulk[:, -1], shift=1, axis=0)
-    basepoints = basepoints.at[0].set(path[0])
-    path_bulk = jnp.concatenate([basepoints[:, None, :], path_bulk], axis=1)
-    path_remainder = path[bulk_length - 1 :]
+    path_remainder = path_increments[bulk_length:]
 
     multi_signatures = jax.vmap(
         partial(_signature, depth=depth, stream=stream, flatten=False, unroll=unroll)

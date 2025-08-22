@@ -10,6 +10,7 @@ __all__ = (
     "signature",
     "logsignature",
     "signature_combine",
+    "signature_from_increments",
     "signature_to_logsignature",
     "multi_signature_combine",
 )
@@ -20,5 +21,6 @@ from signax.signatures import (
     multi_signature_combine,
     signature,
     signature_combine,
+    signature_from_increments,
     signature_to_logsignature,
 )
